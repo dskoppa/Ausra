@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aušra — Infrastructure automation</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">✳</span><span>Aušra</span><small>Infrastructure control plane</small></div>
+    <div class="top-actions">
+      <span class="workspace-context"><span class="context-label">WORKSPACE</span><span id="workspace">—</span></span>
+      <button id="density-toggle" class="icon-button" type="button" aria-label="Switch to compact density" aria-pressed="false">▦ <span>Compact</span></button>
+      <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch to light theme">☼ <span>Light</span></button>
+      <button id="logout" class="ghost" hidden>Sign out</button>
+    </div>
+  </header>
+  <main>
+    <section id="login-panel" class="login-layout" hidden>
+      <div class="login-story">
+        <div class="eyebrow">THE NEXT DAY STARTS HERE</div>
+        <h1>See the whole system.<br><em>Move with confidence.</em></h1>
+        <p>Aušra brings infrastructure work, approvals, and run history into one clear command center.</p>
+        <div class="login-orbit" aria-hidden="true"><span class="orbit-sun"></span><span class="orbit-node node-one"></span><span class="orbit-node node-two"></span><span class="orbit-node node-three"></span></div>
+      </div>
+      <div class="login card">
+        <span class="card-kicker">SECURE ACCESS</span>
+        <h2>Welcome back</h2>
+        <p>Sign in to your Aušra workspace.</p>
+        <form id="login-form">
+          <label>Admin password<input name="password" type="password" autocomplete="current-password" required></label>
+          <button type="submit">Enter workspace <span aria-hidden="true">↗</span></button>
+        </form>
+        <div class="login-footnote">Your infrastructure, under your control.</div>
+      </div>
+    </section>
+    <section id="app" hidden>
+      <div class="hero">
+        <div class="hero-copy"><div class="eyebrow"><span class="eyebrow-line"></span> AUTOMATION CONTROL PLANE</div><h1>Infrastructure,<br><em>in focus.</em></h1><p>Launch with confidence. Follow every step. Understand what changed.</p><span class="status-pill"><i></i> Self-hosted control plane</span></div>
+        <div class="hero-visual" aria-label="Current operations pulse">
+          <div class="hero-orbit" aria-hidden="true"><span class="orbit-core">✳</span><span class="orbit-point orbit-point-a"></span><span class="orbit-point orbit-point-b"></span><span class="orbit-point orbit-point-c"></span></div>
+          <div class="pulse-card"><span class="pulse-label"><i class="pulse-dot"></i> SYSTEM PULSE</span><button class="pulse-line" type="button" data-overview-target="runs" data-run-filter="active" aria-label="View active runs"><strong id="active-count">0</strong><span>active runs <span aria-hidden="true">↗</span></span></button><button class="pulse-line" type="button" data-overview-target="runs" data-run-filter="approval" aria-label="View runs awaiting approval"><strong id="attention-count">0</strong><span>awaiting approval <span aria-hidden="true">↗</span></span></button><small id="last-sync">Waiting for first sync</small></div>
+        </div>
+      </div>
+      <div class="stats"><button class="stat" type="button" data-overview-target="jobs" aria-label="View all jobs"><span class="stat-icon" aria-hidden="true">⌘</span><b id="job-count">0</b><span>Jobs</span><small>Ready to execute</small></button><button class="stat" type="button" data-overview-target="workflows" aria-label="View all workflows"><span class="stat-icon" aria-hidden="true">◇</span><b id="workflow-count">0</b><span>Workflows</span><small>Connected operations</small></button><button class="stat" type="button" data-overview-target="schedules" aria-label="View all schedules"><span class="stat-icon" aria-hidden="true">◷</span><b id="schedule-count">0</b><span>Schedules</span><small>On the horizon</small></button><button class="stat" type="button" data-overview-target="runs" aria-label="View all runs"><span class="stat-icon" aria-hidden="true">↗</span><b id="run-count">0</b><span>Runs</span><small>Recorded history</small></button></div>
+      <nav class="tabs" aria-label="Workspace sections"><button data-tab="jobs" class="active">Jobs</button><button data-tab="repositories">Repositories</button><button data-tab="workflows">Workflows</button><button data-tab="schedules">Schedules</button><button data-tab="runs">Runs</button><button data-tab="audit">Audit</button></nav>
+      <section id="jobs" class="tab-panel">
+        <div class="section-title"><div><h2>Jobs</h2><p>Run Ansible, Terraform, OpenTofu, or a shell script from your workspace.</p></div></div>
+        <div class="layout"><div class="card list" id="jobs-list"></div><div class="card form-card"><h3>Create job</h3><form id="job-form"><label>Name<input name="name" placeholder="Deploy web servers" required minlength="2"></label><label>Project<input name="project" placeholder="Production"></label><label>Source<select name="repositoryId" id="job-repository"><option value="">Mounted workspace</option></select></label><label>Type<select name="type" id="job-type"><option value="ansible">Ansible</option><option value="terraform">Terraform</option><option value="tofu">OpenTofu</option><option value="shell">Shell</option></select></label><label id="job-dir-label">Workspace directory<input name="dir" placeholder="infra/production" value="."></label><label id="args-label">Arguments, one per line<textarea name="args" rows="4" placeholder="playbook.yml&#10;-i&#10;inventory.ini"></textarea></label><label id="command-label" hidden>Shell script<textarea name="command" rows="5" placeholder="echo 'Hello from Aušra'"></textarea></label><label>Timeout in seconds<input name="timeoutSec" type="number" min="1" max="86400" value="3600"></label><button type="submit">Create job</button></form></div></div>
+      </section>
+      <section id="repositories" class="tab-panel" hidden>
+        <div class="section-title"><div><h2>Repositories</h2><p>Connect a public HTTPS Git repository, choose a branch, tag, or commit, and sync it before running jobs.</p></div></div>
+        <div class="layout"><div class="card list" id="repositories-list"></div><div class="card form-card"><h3>Connect repository</h3><form id="repository-form"><label>Name<input name="name" placeholder="Infrastructure source" required minlength="2"></label><label>Project<input name="project" placeholder="Production"></label><label>HTTPS Git URL<input name="url" type="url" placeholder="https://github.com/team/infrastructure.git" required></label><label>Branch, tag, or full commit<input name="ref" placeholder="Default branch"></label><p class="form-note">Private repository credentials are not supported yet. Do not put a token in the URL.</p><button type="submit">Connect and sync</button></form></div></div>
+        <div class="card webhook-setup" id="webhook-setup" hidden><h3>GitHub webhook setup</h3><p>In the GitHub repository, open Settings → Webhooks → Add webhook. Choose <strong>application/json</strong>, paste this URL and secret, and select <strong>push</strong> events. The secret appears only now. Pushes sync the matching branch or tag. Choose an optional job or workflow trigger on the repository card; triggered runs always wait for admin approval.</p><label>Payload URL<input id="webhook-url" readonly></label><label>Secret<input id="webhook-secret" readonly></label><div class="item-actions"><button type="button" class="ghost" data-copy="webhook-url">Copy URL</button><button type="button" class="ghost" data-copy="webhook-secret">Copy secret</button><button type="button" class="ghost" id="webhook-setup-close">Done</button></div><p class="form-note">GitHub must be able to reach this URL over public HTTPS. A localhost URL needs a reverse proxy and public hostname.</p></div>
+        <div class="card webhook-setup" id="webhook-deliveries" hidden><div class="item-head"><h3 id="webhook-deliveries-title">Recent deliveries</h3><button type="button" class="ghost" id="webhook-deliveries-close">Close</button></div><div id="webhook-deliveries-list" class="list"></div></div>
+      </section>
+      <section id="workflows" class="tab-panel" hidden>
+        <div class="section-title"><div><h2>Workflows</h2><p>Chain jobs in order. Pause for approval before execution when needed.</p></div></div>
+        <div class="layout"><div class="card list" id="workflows-list"></div><div class="card form-card"><h3>Create workflow</h3><form id="workflow-form"><label>Name<input name="name" placeholder="Provision and configure" required minlength="2"></label><label>Project<input name="project" placeholder="Production"></label><label>Job IDs in execution order, one per line<textarea name="jobIds" rows="5" placeholder="Copy job IDs from the list" required></textarea></label><label class="checkbox"><input name="requireApproval" type="checkbox"> Require approval before running</label><button type="submit">Create workflow</button></form></div></div>
+      </section>
+      <section id="schedules" class="tab-panel" hidden>
+        <div class="section-title"><div><h2>Schedules</h2><p>Run a job or workflow repeatedly on a fixed interval.</p></div></div>
+        <div class="layout"><div class="card list" id="schedules-list"></div><div class="card form-card"><h3>Create schedule</h3><form id="schedule-form"><label>Name<input name="name" placeholder="Nightly check" required minlength="2"></label><label>Target<select name="target" id="schedule-target"></select></label><label>Every N minutes<input name="everyMinutes" type="number" min="1" max="525600" value="1440" required></label><button type="submit">Create schedule</button></form></div></div>
+      </section>
+      <section id="runs" class="tab-panel" hidden><div class="section-title"><div><h2>Runs</h2><p>Status, steps, and captured output for each execution. <span id="refresh-state">Live updates every 10 seconds.</span></p></div><div class="section-actions"><button id="toggle-auto-refresh" class="ghost" type="button" aria-pressed="false">Pause live updates</button><button id="refresh-runs" class="ghost" type="button">Refresh now</button></div></div><div id="runs-filter" class="filter-notice" hidden><span id="runs-filter-label"></span><button id="clear-runs-filter" class="ghost" type="button">Show all runs</button></div><div class="card list" id="runs-list"></div></section>
+      <section id="audit" class="tab-panel" hidden><div class="section-title"><div><h2>Audit</h2><p>Administrative changes and run events.</p></div></div><div class="card list" id="audit-list"></div></section>
+    </section>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <div id="run-announcements" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  </main>
+</body>
+</html>

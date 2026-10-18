@@ -1,0 +1,13 @@
+services:
+  ausra:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      AUSRA_ADMIN_PASSWORD: ${AUSRA_ADMIN_PASSWORD:?Set AUSRA_ADMIN_PASSWORD in .env}
+    volumes:
+      - ausra-data:/data
+      - ./workspace:/workspace
+    restart: unless-stopped
+volumes:
+  ausra-data:
