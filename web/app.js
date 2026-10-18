@@ -1,14 +1,23 @@
 const $ = (s) => document.querySelector(s);
 let data = {jobs: [], repositories: [], workflows: [], schedules: [], runs: [], audit: []};
 let runFilter = 'all';
+let runView = 'list';
+try { runView = localStorage.getItem('ausra-runs-view') === 'table' ? 'table' : 'list'; } catch (_) {}
+let runPage = 0;
 let repositoryFilter = 'all';
 let mapSelection = null;
 let selectedProject = '';
-const overviewSections = ['signals', 'map', 'activity', 'setup'];
+let overviewSections = ['signals', 'map', 'activity', 'setup'];
+try { const saved = JSON.parse(localStorage.getItem('ausra-overview-order')); if (Array.isArray(saved) && saved.length === overviewSections.length && new Set(saved).size === overviewSections.length && saved.every(x => overviewSections.includes(x))) overviewSections = saved; } catch (_) {}
 let visibleSections = new Set(overviewSections);
 try { const saved = JSON.parse(localStorage.getItem('ausra-overview-sections')); if (Array.isArray(saved)) visibleSections = new Set(saved.filter(x => overviewSections.includes(x))); } catch (_) {}
+let favoriteProjects = new Set();
+try { const saved = JSON.parse(localStorage.getItem('ausra-favorite-projects')); if (Array.isArray(saved)) favoriteProjects = new Set(saved.filter(x => typeof x === 'string')); } catch (_) {}
+let selectedTimeZone = 'local';
+try { selectedTimeZone = localStorage.getItem('ausra-time-zone') || 'local'; } catch (_) {}
 let autoRefresh = true;
 let runSnapshotReady = false;
+let changedRunIds = new Set();
 const openLogs = new Set();
 const triggerDrafts = new Map();
 let savedTheme = 'dark';
@@ -44,6 +53,15 @@ $('#theme-toggle').addEventListener('click', () => {
   try { localStorage.setItem('ausra-theme', next); } catch (_) {}
   syncThemeButton();
 });
+const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local';
+$('#time-zone option[value="local"]').textContent = `Browser time zone (${browserZone})`;
+for (const zone of (Intl.supportedValuesOf?.('timeZone') || [])) {
+  if (zone === 'UTC') continue;
+  $('#time-zone').add(new Option(zone.replaceAll('_', ' '), zone));
+}
+if (![...$('#time-zone').options].some(x => x.value === selectedTimeZone)) selectedTimeZone = 'local';
+$('#time-zone').value = selectedTimeZone;
+$('#time-zone').addEventListener('change', e => { selectedTimeZone = e.target.value; try { localStorage.setItem('ausra-time-zone',selectedTimeZone); } catch (_) {} render(); });
 const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const statusDisplay = {
   succeeded: {label:'Succeeded', icon:'✓'},
@@ -66,18 +84,19 @@ function statusBadge(status) {
   const display = statusDisplay[status] || {label:String(status).replaceAll('_', ' '), icon:'•'};
   return `<span class="badge ${escapeHTML(status)}"><span class="badge-icon" aria-hidden="true">${display.icon}</span>${escapeHTML(display.label)}</span>`;
 }
-const stamp = (s) => s ? new Date(s).toLocaleString() : '—';
+function stamp(s) { if (!s) return '—'; const date = new Date(s); if (Number.isNaN(date.getTime())) return '—'; try { return date.toLocaleString(undefined, selectedTimeZone === 'local' ? {} : {timeZone:selectedTimeZone, timeZoneName:'short'}); } catch (_) { return date.toLocaleString(); } }
 const auditActor = action => /^(login|(?:job|workflow|schedule)\.(?:created|deleted)|repository\.(?:created|deleted|webhook_enabled|webhook_disabled|webhook_trigger_changed)|run\.(?:approved|canceled))$/.test(action) ? 'Admin (inferred)' : 'Not recorded';
 function toast(message, error=false) { const el=$('#toast'); el.textContent=message; el.className=error?'error':''; el.style.display='block'; clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.style.display='none',4500); }
 async function api(path, options={}) { const response=await fetch('/api'+path,{headers:{'Content-Type':'application/json'},...options}); const value=await response.json(); if(!response.ok) throw new Error(value.error||'Request failed'); return value; }
 function announceRunChanges(before, after) {
+  changedRunIds = new Set();
   if (!runSnapshotReady) { runSnapshotReady = true; return; }
   const previous = new Map(before.map(run => [run.id, run]));
   const changes = after.flatMap(run => {
     const old = previous.get(run.id);
-    if (!old) return [`${run.targetName} started; ${statusDisplay[run.status]?.label || run.status}`];
-    if (old.status !== run.status) return [`${run.targetName}: ${statusDisplay[run.status]?.label || run.status}`];
-    if (old.step !== run.step && run.step) return [`${run.targetName}: step ${run.step}`];
+    if (!old) { changedRunIds.add(run.id); return [`${run.targetName} started; ${statusDisplay[run.status]?.label || run.status}`]; }
+    if (old.status !== run.status) { changedRunIds.add(run.id); return [`${run.targetName}: ${statusDisplay[run.status]?.label || run.status}`]; }
+    if (old.step !== run.step && run.step) { changedRunIds.add(run.id); return [`${run.targetName}: step ${run.step}`]; }
     return [];
   });
   if (changes.length) $('#run-announcements').textContent = changes.length <= 2 ? changes.join('. ') : `${changes.length} run updates. Open Runs to review.`;
@@ -90,10 +109,9 @@ function webhookTriggerOptions(repoId) {
   return [...jobs,...workflows];
 }
 function renderOverview() {
-  overviewSections.forEach(name => {
-    document.querySelector(`[data-overview-panel="${name}"]`).hidden = !visibleSections.has(name);
-    document.querySelector(`[data-overview-section="${name}"]`).checked = visibleSections.has(name);
-  });
+  const sectionNames = {signals:'Operational signals', map:'Project map', activity:'Recent activity', setup:'Setup path'};
+  $('#overview-option-list').innerHTML = overviewSections.map((name, i) => `<div class="overview-option-row"><label class="checkbox"><input type="checkbox" data-overview-section="${name}" ${visibleSections.has(name) ? 'checked' : ''}> ${sectionNames[name]}</label><div class="overview-option-actions"><button class="ghost" type="button" data-order-section="${name}" data-order-direction="up" aria-label="Move ${sectionNames[name]} up" ${i === 0 ? 'disabled' : ''}>↑</button><button class="ghost" type="button" data-order-section="${name}" data-order-direction="down" aria-label="Move ${sectionNames[name]} down" ${i === overviewSections.length-1 ? 'disabled' : ''}>↓</button></div></div>`).join('');
+  overviewSections.forEach(name => { const panel=document.querySelector(`[data-overview-panel="${name}"]`); panel.hidden = !visibleSections.has(name); $('#overview-layout').append(panel); });
   const active = data.runs.filter(r => ['queued', 'running'].includes(r.status));
   const approvals = data.runs.filter(r => r.status === 'waiting_approval');
   const unhealthy = data.repositories.filter(r => r.lastError || r.webhookLastError);
@@ -105,6 +123,12 @@ function renderOverview() {
   if (!projects.includes(selectedProject)) selectedProject = projects[0] || '';
   $('#project-picker').innerHTML = projects.length ? projects.map(p => `<option value="${escapeHTML(p)}">${escapeHTML(p)}</option>`).join('') : '<option value="">No projects yet</option>';
   $('#project-picker').value = selectedProject;
+  $('#favorite-project').disabled = !selectedProject;
+  $('#favorite-project').setAttribute('aria-pressed',String(favoriteProjects.has(selectedProject)));
+  $('#favorite-project').textContent = favoriteProjects.has(selectedProject) ? '★ Favorited' : '☆ Favorite';
+  const availableFavorites = projects.filter(p => favoriteProjects.has(p));
+  $('#favorite-projects').hidden = !availableFavorites.length;
+  $('#favorite-projects').innerHTML = availableFavorites.map(p => `<button class="ghost" type="button" data-favorite-select="${escapeHTML(p)}" ${p === selectedProject ? 'aria-current="true"' : ''}>★ ${escapeHTML(p)}</button>`).join('');
   const repos = data.repositories.filter(x => projectOf(x) === selectedProject);
   const jobs = data.jobs.filter(x => projectOf(x) === selectedProject);
   const workflows = data.workflows.filter(x => projectOf(x) === selectedProject);
@@ -135,6 +159,17 @@ function renderMapDetail() {
   const target = kind === 'repository' ? 'repositories' : kind === 'job' ? 'jobs' : 'workflows';
   panel.innerHTML = `<div class="item-head"><div><span class="card-kicker">${escapeHTML(kind.toUpperCase())}</span><h3>${escapeHTML(item.name)}</h3></div><button class="text-button" type="button" data-overview-target="${target}" data-focus-id="${escapeHTML(item.id)}">Open detail ↗</button></div><div class="meta">Project: ${escapeHTML(item.project || 'Workspace')} · ID: ${escapeHTML(item.id)}</div><div class="meta">${kind === 'repository' ? 'Jobs using this source' : kind === 'job' ? 'Workflows containing this job' : 'Jobs in execution order'}:</div><div class="map-relations">${related.length ? related.map(x => `<button class="ghost" type="button" data-map-kind="${x.kind}" data-map-id="${escapeHTML(x.id)}">${escapeHTML(x.name)} ↗</button>`).join('') : '<span class="meta">None</span>'}</div>`;
 }
+function workflowSteps(run) {
+  if (run.targetType !== 'workflow') return '';
+  const workflow = data.workflows.find(w => w.id === run.targetId);
+  if (!workflow) return '';
+  return `<ol class="run-steps" aria-label="Workflow steps">${workflow.jobIds.map((id, index) => {
+    const number = index + 1;
+    const state = run.status === 'succeeded' || run.step > number ? 'complete' : run.step === number && run.status === 'failed' ? 'failed' : run.step === number && run.status === 'running' ? 'current' : 'pending';
+    const name = data.jobs.find(j => j.id === id)?.name || 'Deleted job';
+    return `<li class="${state}" ${state === 'current' ? 'aria-current="step"' : ''}><span class="step-marker" aria-hidden="true">${state === 'complete' ? '✓' : number}</span><span>${escapeHTML(name)}<small>${state === 'complete' ? 'Complete' : state === 'failed' ? 'Failed' : state === 'current' ? 'Running' : 'Pending'}</small></span></li>`;
+  }).join('')}</ol>`;
+}
 function render() {
   ['jobs','workflows','schedules','runs'].forEach(k=>$('#'+k.slice(0,-1)+'-count').textContent=data[k].length);
   $('#active-count').textContent = data.runs.filter(r => r.status === 'running' || r.status === 'queued').length;
@@ -162,7 +197,19 @@ function render() {
   const visibleRuns = data.runs.filter(r => runFilter === 'all' || (runFilter === 'active' && ['queued','running'].includes(r.status)) || (runFilter === 'approval' && r.status === 'waiting_approval') || runFilter === 'id:' + r.id);
   $('#runs-filter').hidden = runFilter === 'all';
   $('#runs-filter-label').textContent = runFilter === 'active' ? 'Showing active runs' : runFilter === 'approval' ? 'Showing runs awaiting approval' : 'Showing selected run';
-  $('#runs-list').innerHTML=visibleRuns.length ? visibleRuns.map(r=>`<div class="item" data-item-id="${escapeHTML(r.id)}"><div class="item-head"><div><h3>${escapeHTML(r.targetName)}</h3><div class="meta">${escapeHTML(r.targetType)} · ${escapeHTML(r.triggeredBy)} · ${stamp(r.startedAt)}${r.step?' · step '+r.step:''}</div>${(r.sources||[]).map(s=>`<div class="meta">${escapeHTML(data.repositories.find(repo=>repo.id===s.repositoryId)?.name||s.repositoryId)} @ <span class="code" title="${escapeHTML(s.commit)}">${escapeHTML(s.commit.slice(0,12)||'unsynced')}</span></div>`).join('')}</div>${statusBadge(r.status)}</div><div class="item-actions">${r.status==='waiting_approval'?`<button data-action="approve" data-id="${r.id}">Approve</button>`:''}${['queued','running','waiting_approval'].includes(r.status)?`<button class="ghost danger" data-action="cancel" data-id="${r.id}">Cancel</button>`:''}<button class="ghost" data-action="toggle-log" data-id="${r.id}" aria-controls="log-${r.id}" aria-expanded="${openLogs.has(r.id)}">${openLogs.has(r.id)?'Hide log':'View log'}</button></div><pre id="log-${r.id}" ${openLogs.has(r.id)?'':'hidden'}>${escapeHTML(r.log||'No output yet.')}</pre></div>`).join('') : `<div class="empty">${runFilter === 'all' ? 'No runs yet. Create a job and use Run now to start one.' : 'No matching runs.'}</div>`;
+  $('#runs-list').innerHTML=runView === 'table' ? '' : visibleRuns.length ? visibleRuns.map(r=>`<div class="item ${changedRunIds.has(r.id) ? 'run-updated' : ''}" data-item-id="${escapeHTML(r.id)}"><div class="item-head"><div><h3>${escapeHTML(r.targetName)}</h3><div class="meta">${escapeHTML(r.targetType)} · ${escapeHTML(r.triggeredBy)} · ${stamp(r.startedAt)}${r.step?' · step '+r.step:''}</div>${(r.sources||[]).map(s=>`<div class="meta">${escapeHTML(data.repositories.find(repo=>repo.id===s.repositoryId)?.name||s.repositoryId)} @ <span class="code" title="${escapeHTML(s.commit)}">${escapeHTML(s.commit.slice(0,12)||'unsynced')}</span></div>`).join('')}</div>${statusBadge(r.status)}</div>${workflowSteps(r)}<div class="item-actions">${r.status==='waiting_approval'?`<button data-action="approve" data-id="${r.id}">Approve</button>`:''}${['queued','running','waiting_approval'].includes(r.status)?`<button class="ghost danger" data-action="cancel" data-id="${r.id}">Cancel</button>`:''}<button class="ghost" data-action="toggle-log" data-id="${r.id}" aria-controls="log-${r.id}" aria-expanded="${openLogs.has(r.id)}">${openLogs.has(r.id)?'Hide log':'View log'}</button></div><pre id="log-${r.id}" ${openLogs.has(r.id)?'':'hidden'}>${escapeHTML(r.log||'No output yet.')}</pre></div>`).join('') : `<div class="empty">${runFilter === 'all' ? 'No runs yet. Create a job and use Run now to start one.' : 'No matching runs.'}</div>`;
+  $('#runs-list').hidden = runView === 'table';
+  $('#runs-table').hidden = runView !== 'table';
+  $('#runs-view-toggle').textContent = runView === 'table' ? 'List view' : 'Table view';
+  $('#runs-view-toggle').setAttribute('aria-pressed',String(runView === 'table'));
+  const pageSize = 50;
+  runPage = Math.min(runPage, Math.max(0, Math.ceil(visibleRuns.length / pageSize) - 1));
+  const pageRuns = visibleRuns.slice(runPage * pageSize, (runPage + 1) * pageSize);
+  $('#runs-table').innerHTML = visibleRuns.length ? `<table><caption class="visually-hidden">Run history</caption><thead><tr><th scope="col">Status</th><th scope="col">Target</th><th scope="col">Triggered by</th><th scope="col">Started</th><th scope="col">Step</th><th scope="col">Detail</th></tr></thead><tbody>${pageRuns.map(r => `<tr class="${changedRunIds.has(r.id) ? 'run-updated' : ''}"><td>${statusBadge(r.status)}</td><td>${escapeHTML(r.targetName)}<small>${escapeHTML(r.targetType)}</small></td><td>${escapeHTML(r.triggeredBy)}</td><td>${escapeHTML(stamp(r.startedAt))}</td><td>${r.step || '—'}</td><td><button class="text-button" type="button" data-show-run="${escapeHTML(r.id)}">View run ↗</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">No matching runs.</div>';
+  $('#runs-pagination').hidden = runView !== 'table' || visibleRuns.length <= pageSize;
+  $('#runs-page-label').textContent = `${visibleRuns.length ? runPage * pageSize + 1 : 0}–${Math.min((runPage + 1) * pageSize, visibleRuns.length)} of ${visibleRuns.length}`;
+  $('#runs-prev').disabled = runPage === 0;
+  $('#runs-next').disabled = (runPage + 1) * pageSize >= visibleRuns.length;
   $('#audit-list').innerHTML=data.audit.length ? data.audit.slice(0,100).map((a,index)=>`<div class="item" data-audit-item="${index}"><strong>${escapeHTML(a.action)}</strong><div class="meta">${stamp(a.at)} · ${escapeHTML(a.detail)}</div></div>`).join('') : '<div class="empty">No activity yet.</div>';
 }
 function selectTab(name) {
@@ -170,9 +217,12 @@ function selectTab(name) {
   document.querySelectorAll('.tab-panel').forEach(x=>x.hidden=x.id!==name);
   document.querySelector('#'+name).scrollIntoView({block:'start',behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
 }
-document.addEventListener('click', async e => { const overview=e.target.closest('[data-overview-target]'); if(overview) { runFilter=overview.dataset.runId ? 'id:'+overview.dataset.runId : overview.dataset.runFilter||'all'; repositoryFilter=overview.dataset.repositoryFilter||'all'; render(); selectTab(overview.dataset.overviewTarget); const focus=overview.dataset.focusId && [...document.querySelectorAll(`#${overview.dataset.overviewTarget} [data-item-id]`)].find(x=>x.dataset.itemId===overview.dataset.focusId); const audit=overview.dataset.auditIndex && document.querySelector(`#audit [data-audit-item="${overview.dataset.auditIndex}"]`); (focus||audit)?.scrollIntoView({block:'center'}); return; }
+document.addEventListener('click', async e => { const overview=e.target.closest('[data-overview-target]'); if(overview) { runFilter=overview.dataset.runId ? 'id:'+overview.dataset.runId : overview.dataset.runFilter||'all'; runPage=0; if(overview.dataset.runId) runView='list'; repositoryFilter=overview.dataset.repositoryFilter||'all'; render(); selectTab(overview.dataset.overviewTarget); const focus=overview.dataset.focusId && [...document.querySelectorAll(`#${overview.dataset.overviewTarget} [data-item-id]`)].find(x=>x.dataset.itemId===overview.dataset.focusId); const audit=overview.dataset.auditIndex && document.querySelector(`#audit [data-audit-item="${overview.dataset.auditIndex}"]`); (focus||audit)?.scrollIntoView({block:'center'}); return; }
+  const tableRun=e.target.closest('[data-show-run]'); if(tableRun) { runFilter='id:'+tableRun.dataset.showRun; runView='list'; runPage=0; render(); $('#runs-list').scrollIntoView({block:'start'}); return; }
+  const orderButton=e.target.closest('[data-order-section]'); if(orderButton) { const index=overviewSections.indexOf(orderButton.dataset.orderSection); const other=index+(orderButton.dataset.orderDirection==='up'?-1:1); if(other>=0 && other<overviewSections.length) { [overviewSections[index],overviewSections[other]]=[overviewSections[other],overviewSections[index]]; try { localStorage.setItem('ausra-overview-order',JSON.stringify(overviewSections)); } catch (_) {} renderOverview(); document.querySelector(`[data-order-section="${orderButton.dataset.orderSection}"][data-order-direction="${orderButton.dataset.orderDirection}"]`)?.focus(); } return; }
+  const favorite=e.target.closest('[data-favorite-select]'); if(favorite) { selectedProject=favorite.dataset.favoriteSelect; mapSelection=null; renderOverview(); return; }
   const mapNode=e.target.closest('[data-map-kind]'); if(mapNode) { mapSelection={kind:mapNode.dataset.mapKind,id:mapNode.dataset.mapId}; const collection={repository:data.repositories,job:data.jobs,workflow:data.workflows}[mapSelection.kind]; const item=collection?.find(x=>x.id===mapSelection.id); if(item) selectedProject=item.project||'Workspace'; renderOverview(); $('#map-detail').scrollIntoView({block:'nearest'}); return; }
-  const tab=e.target.closest('[data-tab]'); if(tab) { if(tab.dataset.tab==='runs') {runFilter='all';render();} selectTab(tab.dataset.tab); return; }
+  const tab=e.target.closest('[data-tab]'); if(tab) { if(tab.dataset.tab==='runs') {runFilter='all';runPage=0;render();} selectTab(tab.dataset.tab); return; }
   const copy=e.target.closest('[data-copy]'); if(copy) { try { await navigator.clipboard.writeText($('#'+copy.dataset.copy).value); toast('Copied'); } catch (_) { toast('Copy failed; select the field to copy',true); } return; }
   const button=e.target.closest('[data-action]'); if(!button) return; const {action,id}=button.dataset;
   if(action==='toggle-log') { const log=$('#log-'+id); log.hidden=!log.hidden; if(log.hidden) openLogs.delete(id); else openLogs.add(id); button.setAttribute('aria-expanded',String(!log.hidden)); button.textContent=log.hidden?'View log':'Hide log'; return; }
@@ -187,6 +237,7 @@ document.addEventListener('change',e=>{ if(e.target.matches('[data-trigger-repo]
 $('#customize-overview').addEventListener('click',e=>{ const panel=$('#overview-options'); panel.hidden=!panel.hidden; e.currentTarget.setAttribute('aria-expanded',String(!panel.hidden)); });
 document.addEventListener('change',e=>{ if(e.target.matches('[data-overview-section]')) { if(e.target.checked) visibleSections.add(e.target.dataset.overviewSection); else visibleSections.delete(e.target.dataset.overviewSection); try { localStorage.setItem('ausra-overview-sections',JSON.stringify([...visibleSections])); } catch (_) {} renderOverview(); } });
 $('#project-picker').addEventListener('change',e=>{ selectedProject=e.target.value; mapSelection=null; renderOverview(); });
+$('#favorite-project').addEventListener('click',()=>{ if(!selectedProject) return; if(favoriteProjects.has(selectedProject)) favoriteProjects.delete(selectedProject); else favoriteProjects.add(selectedProject); try { localStorage.setItem('ausra-favorite-projects',JSON.stringify([...favoriteProjects])); } catch (_) {} renderOverview(); });
 $('#clear-repositories-filter').addEventListener('click',()=>{repositoryFilter='all';render();});
 function hideWebhookSetup() { $('#webhook-url').value=''; $('#webhook-secret').value=''; $('#webhook-setup').hidden=true; }
 $('#webhook-setup-close').addEventListener('click',hideWebhookSetup);
@@ -200,7 +251,10 @@ $('#repository-form').addEventListener('submit',async e=>{e.preventDefault(); co
 $('#workflow-form').addEventListener('submit',async e=>{e.preventDefault(); const f=new FormData(e.target); const payload={name:f.get('name'),project:f.get('project'),jobIds:String(f.get('jobIds')).split('\n').map(s=>s.trim()).filter(Boolean),requireApproval:f.has('requireApproval')}; try {await api('/workflows',{method:'POST',body:JSON.stringify(payload)});e.target.reset();await load();toast('Workflow created');}catch(err){toast(err.message,true);} });
 $('#schedule-form').addEventListener('submit',async e=>{e.preventDefault(); const f=new FormData(e.target); const [targetType,targetId]=String(f.get('target')).split(':'); try {await api('/schedules',{method:'POST',body:JSON.stringify({name:f.get('name'),targetType,targetId,everyMinutes:Number(f.get('everyMinutes'))})});e.target.reset();await load();toast('Schedule created');}catch(err){toast(err.message,true);} });
 $('#refresh-runs').addEventListener('click',()=>load().catch(err=>toast(err.message,true)));
+$('#runs-view-toggle').addEventListener('click',()=>{runView=runView==='list'?'table':'list';runPage=0;try {localStorage.setItem('ausra-runs-view',runView);} catch (_) {} render();});
+$('#runs-prev').addEventListener('click',()=>{runPage=Math.max(0,runPage-1);render();});
+$('#runs-next').addEventListener('click',()=>{runPage++;render();});
 $('#toggle-auto-refresh').addEventListener('click',()=>{autoRefresh=!autoRefresh;$('#toggle-auto-refresh').textContent=autoRefresh?'Pause live updates':'Resume live updates';$('#toggle-auto-refresh').setAttribute('aria-pressed',String(!autoRefresh));$('#refresh-state').textContent=autoRefresh?'Live updates every 10 seconds.':'Live updates paused.';$('#overview-refresh-state').textContent=autoRefresh?'Refreshes every 10 seconds.':'Live updates paused.';});
-$('#clear-runs-filter').addEventListener('click',()=>{runFilter='all';render();});
+$('#clear-runs-filter').addEventListener('click',()=>{runFilter='all';runPage=0;render();});
 api('/me').then(me=>{$('#workspace').textContent=me.workspace;showApp(true);return load();}).catch(()=>showApp(false));
 setInterval(()=>{if(!$('#app').hidden && autoRefresh) load().catch(()=>{$('#last-sync').textContent='Update failed';$('#overview-refresh-state').textContent='Update failed. Retrying in 10 seconds.';});},10000);

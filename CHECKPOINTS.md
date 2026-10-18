@@ -22,12 +22,16 @@ This is the implementation and release checklist for a team-ready, self-hosted A
 - [x] Define the "dawn" visual language: deep slate surfaces, warm sunrise highlights for attention, teal for healthy connections, and distinct warning/error colors. Document tokens for light and dark themes. **P0** See `DESIGN_SYSTEM.md` and `web/style.css`.
 - [x] Define typography for headings, dense operational data, and monospace code/logs; set a spacing scale, component states, icon rules, and responsive breakpoints. **P0** See `DESIGN_SYSTEM.md` and `web/style.css`.
 - [ ] Build reusable components for navigation, cards, tables, filters, badges, timelines, diagrams, drawers, forms, code diffs, logs, dialogs, and empty/error states. **P0**
+  - [x] Reuse visual tokens and styles for navigation, cards, badges, forms, logs, and empty states across the current screens.
+  - [ ] Build accessible shared React components for tables, filters, timelines, diagrams, drawers, code diffs, dialogs, and error states.
 - [ ] Migrate the prototype UI to React and TypeScript, use accessible component primitives and server-data libraries, and preserve the current screens, themes, and Docker deployment. **P0**
+  - [ ] Move the working screens and webhook controls into typed React components without changing their API behavior.
+  - [ ] Build the UI with Vite in Docker and adopt accessible primitives and TanStack Query with parity checks.
 - [x] Make color, shape, label, and icon work together to communicate status; test that statuses remain clear without color. **P0** Run badges were checked in a grayscale Chrome rendering.
-- [ ] Add meaningful transitions for opening context, moving between workflow steps, and run-state changes; respect reduced-motion preferences. **P1**
+- [x] Add meaningful transitions for opening context, moving between workflow steps, and run-state changes; respect reduced-motion preferences. **P1** Context entry, a labeled workflow step list, and changed-run highlighting were checked in Chrome with reduced motion enabled.
 - [x] Add a persistent spacious/compact density control for the current overview and lists; verify that it survives reload and fits mobile widths. **P1**
-- [ ] Apply the density control to high-volume tables when those components are built. **P1**
-- [ ] Preserve user preferences for theme, density, time zone, favorite projects, and dashboard layout. **P1**
+- [x] Apply the density control to high-volume tables when those components are built. **P1** The paged Runs table shows 50 rows per page and uses compact cell spacing. Chrome checks covered compact spacing and a 61-row page change.
+- [x] Preserve user preferences for theme, density, time zone, favorite projects, and dashboard layout. **P1** Browser storage restores these choices after reload; the time zone, favorite, and section order were checked in Chrome.
 
 ### Navigation and screen map
 
