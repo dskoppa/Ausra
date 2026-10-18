@@ -18,6 +18,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
+	"golang.org/x/time/rate"
 )
 
 //go:embed web/*
@@ -90,15 +93,17 @@ type State struct {
 }
 
 type App struct {
-	mu          sync.Mutex
-	repoMu      sync.Mutex
-	state       State
-	dataFile    string
-	workspace   string
-	adminPass   string
-	sessions    map[string]time.Time
-	cancelRun   map[string]context.CancelFunc
-	lastSaveErr error
+	mu             sync.Mutex
+	repoMu         sync.Mutex
+	state          State
+	dataFile       string
+	workspace      string
+	adminPass      string
+	sessions       map[string]time.Time
+	cancelRun      map[string]context.CancelFunc
+	lastSaveErr    error
+	deliveryLedger *bolt.DB
+	webhookLimits  map[string]*rate.Limiter
 }
 
 func main() {
@@ -127,18 +132,11 @@ func main() {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		log.Fatal(err)
 	}
-	for i := range a.state.Runs {
-		if a.state.Runs[i].Status == "running" || a.state.Runs[i].Status == "queued" {
-			a.state.Runs[i].Status = "interrupted"
-			a.state.Runs[i].FinishedAt = time.Now().UTC()
-		}
-	}
-	for i := range a.state.WebhookDeliveries {
-		if a.state.WebhookDeliveries[i].Status == "processing" {
-			a.state.WebhookDeliveries[i].Status = "failed"
-		}
-	}
 	a.mu.Lock()
+	a.recoverInterruptedLocked()
+	if err := a.ensureDeliveryLedgerLocked(); err != nil {
+		log.Fatal(err)
+	}
 	if err := a.saveLocked(); err != nil {
 		log.Fatal(err)
 	}
@@ -168,6 +166,27 @@ func main() {
 	server := &http.Server{Addr: env("AUSRA_ADDR", "127.0.0.1:8080"), Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("Aušra listening on %s; workspace %s", server.Addr, root)
 	log.Fatal(server.ListenAndServe())
+}
+
+func (a *App) recoverInterruptedLocked() {
+	for i := range a.state.Runs {
+		if a.state.Runs[i].Status == "running" || a.state.Runs[i].Status == "queued" {
+			a.state.Runs[i].Status = "interrupted"
+			a.state.Runs[i].FinishedAt = time.Now().UTC()
+		}
+	}
+	for i := range a.state.WebhookDeliveries {
+		delivery := &a.state.WebhookDeliveries[i]
+		if delivery.Status != "processing" {
+			continue
+		}
+		delivery.Status = "failed"
+		delivery.Error = "Interrupted during server restart"
+		if repo := a.repositoryLocked(delivery.RepositoryID); repo != nil && !delivery.ReceivedAt.Before(repo.WebhookLastDeliveryAt) {
+			repo.WebhookLastStatus = delivery.Status
+			repo.WebhookLastError = delivery.Error
+		}
+	}
 }
 
 func env(key, fallback string) string {

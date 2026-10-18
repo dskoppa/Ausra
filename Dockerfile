@@ -1,6 +1,6 @@
 FROM golang:1.24-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum main.go repositories.go webhooks.go ./
+COPY go.mod go.sum main.go repositories.go webhooks.go delivery_ledger.go ./
 COPY web ./web
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /ausra .
 

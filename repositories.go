@@ -194,6 +194,7 @@ func (a *App) repositoryAction(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	delete(a.webhookLimits, parts[0])
 	a.auditLocked("repository.deleted", name)
 	a.persistLocked()
 	a.mu.Unlock()

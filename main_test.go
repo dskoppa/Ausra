@@ -16,6 +16,7 @@ func testApp(t *testing.T) *App {
 	t.Helper()
 	root := t.TempDir()
 	a := &App{dataFile: filepath.Join(root, "state.json"), workspace: root, adminPass: "long-test-password", sessions: map[string]time.Time{"token": time.Now().Add(time.Hour)}, cancelRun: make(map[string]context.CancelFunc)}
+	t.Cleanup(func() { _ = a.closeDeliveryLedger() })
 	return a
 }
 

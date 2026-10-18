@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/go-github/v68/github"
+	"golang.org/x/time/rate"
 )
 
 // Delivery IDs are scoped to a repository and retained across restarts.
@@ -27,12 +28,39 @@ type WebhookDelivery struct {
 	TargetType   string    `json:"targetType,omitempty"`
 	TargetID     string    `json:"targetId,omitempty"`
 	RunID        string    `json:"runId,omitempty"`
+	Error        string    `json:"error,omitempty"`
 	Status       string    `json:"status"`
 	ReceivedAt   time.Time `json:"receivedAt"`
 }
 
 func (a *App) webhookSecretPath(repoID string) string {
 	return filepath.Join(filepath.Dir(a.dataFile), "webhook-secrets", repoID)
+}
+
+func writeWebhookSecret(path string, secret []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, secret, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func restoreWebhookSecret(path string, secret []byte, existed bool) error {
+	if existed {
+		return writeWebhookSecret(path, secret)
+	}
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func (a *App) repositoryWebhookSettings(w http.ResponseWriter, r *http.Request, repoID string) {
@@ -53,6 +81,13 @@ func (a *App) repositoryWebhookSettings(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	path := a.webhookSecretPath(repoID)
+	previousSecret, readErr := os.ReadFile(path)
+	secretExisted := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		bad(w, 500, "could not read webhook secret")
+		return
+	}
+	previousRepo, previousAudit := *repo, a.state.Audit
 	if r.Method == http.MethodDelete {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			bad(w, 500, "could not remove webhook secret")
@@ -62,7 +97,14 @@ func (a *App) repositoryWebhookSettings(w http.ResponseWriter, r *http.Request, 
 		repo.WebhookLastError = ""
 		repo.WebhookTargetType, repo.WebhookTargetID = "", ""
 		a.auditLocked("repository.webhook_disabled", repo.Name)
-		a.persistLocked()
+		if err := a.saveLocked(); err != nil {
+			*repo, a.state.Audit = previousRepo, previousAudit
+			if restoreErr := restoreWebhookSecret(path, previousSecret, secretExisted); restoreErr != nil {
+				log.Fatalf("restore webhook secret: %v", restoreErr)
+			}
+			bad(w, 503, "could not save webhook settings")
+			return
+		}
 		respond(w, 200, map[string]bool{"ok": true})
 		return
 	}
@@ -72,24 +114,21 @@ func (a *App) repositoryWebhookSettings(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	secret := hex.EncodeToString(secretBytes)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		bad(w, 500, "could not create webhook secret directory")
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(secret), 0600); err != nil {
-		bad(w, 500, "could not save webhook secret")
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeWebhookSecret(path, []byte(secret)); err != nil {
 		bad(w, 500, "could not save webhook secret")
 		return
 	}
 	repo.WebhookEnabled = true
 	repo.WebhookLastError = ""
 	a.auditLocked("repository.webhook_enabled", repo.Name)
-	a.persistLocked()
+	if err := a.saveLocked(); err != nil {
+		*repo, a.state.Audit = previousRepo, previousAudit
+		if restoreErr := restoreWebhookSecret(path, previousSecret, secretExisted); restoreErr != nil {
+			log.Fatalf("restore webhook secret: %v", restoreErr)
+		}
+		bad(w, 503, "could not save webhook settings")
+		return
+	}
 	respond(w, 200, map[string]string{"secret": secret, "path": "/hooks/github/" + repoID})
 }
 
@@ -123,12 +162,17 @@ func (a *App) repositoryWebhookTrigger(w http.ResponseWriter, r *http.Request, r
 			return
 		}
 	}
+	previousRepo, previousAudit := *repo, a.state.Audit
 	repo.WebhookTargetType, repo.WebhookTargetID = input.TargetType, input.TargetID
 	if r.Method == http.MethodDelete {
 		repo.WebhookTargetType, repo.WebhookTargetID = "", ""
 	}
 	a.auditLocked("repository.webhook_trigger_changed", repo.Name+" -> "+repo.WebhookTargetType+":"+repo.WebhookTargetID)
-	a.persistLocked()
+	if err := a.saveLocked(); err != nil {
+		*repo, a.state.Audit = previousRepo, previousAudit
+		bad(w, 503, "could not save webhook trigger")
+		return
+	}
 	respond(w, 200, repo)
 }
 
@@ -265,7 +309,7 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
-	if len(deliveryID) < 1 || len(deliveryID) > 100 || strings.ContainsAny(deliveryID, " \t\r\n") {
+	if len(deliveryID) < 1 || len(deliveryID) > 100 || strings.IndexFunc(deliveryID, func(r rune) bool { return r < '!' || r > '~' }) >= 0 {
 		bad(w, 400, "invalid delivery ID")
 		return
 	}
@@ -281,6 +325,20 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		bad(w, 404, "webhook not found")
 		return
 	}
+	if a.webhookLimits == nil {
+		a.webhookLimits = make(map[string]*rate.Limiter)
+	}
+	limiter := a.webhookLimits[repoID]
+	if limiter == nil {
+		limiter = rate.NewLimiter(10, 100)
+		a.webhookLimits[repoID] = limiter
+	}
+	if !limiter.Allow() {
+		a.mu.Unlock()
+		w.Header().Set("Retry-After", "1")
+		bad(w, 429, "webhook rate limit exceeded")
+		return
+	}
 	secret, err := os.ReadFile(a.webhookSecretPath(repoID))
 	configuredURL, configuredRef := repo.URL, repo.Ref
 	a.mu.Unlock()
@@ -291,6 +349,11 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	payload, err := github.ValidatePayload(r, secret)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			bad(w, 413, "webhook payload exceeds 1 MiB")
+			return
+		}
 		bad(w, 401, "invalid webhook signature or payload")
 		return
 	}
@@ -333,6 +396,22 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		bad(w, 409, "webhook configuration changed; retry delivery")
 		return
 	}
+	if err := a.ensureDeliveryLedgerLocked(); err != nil {
+		a.mu.Unlock()
+		bad(w, 503, "delivery ledger unavailable")
+		return
+	}
+	previousLedger, ledgerExists, err := a.ledgerDeliveryLocked(repoID, deliveryID)
+	if err != nil {
+		a.mu.Unlock()
+		bad(w, 503, "delivery ledger unavailable")
+		return
+	}
+	if ledgerExists && (previousLedger.Event != eventType || previousLedger.Ref != ref || previousLedger.After != after) {
+		a.mu.Unlock()
+		bad(w, 409, "delivery ID was already used for a different event")
+		return
+	}
 	for i := range a.state.WebhookDeliveries {
 		d := &a.state.WebhookDeliveries[i]
 		if d.RepositoryID == repoID && d.ID == deliveryID {
@@ -348,9 +427,18 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 			}
 			previousError := repo.WebhookLastError
 			previousStatus := repo.WebhookLastStatus
+			previousAt := repo.WebhookLastDeliveryAt
 			previousDelivery := *d
+			if err := a.reserveLedgerDeliveryLocked(previousDelivery); err != nil {
+				a.mu.Unlock()
+				bad(w, 503, "could not reserve delivery")
+				return
+			}
 			d.Status = "processing"
 			d.After = after
+			d.Error = ""
+			d.ReceivedAt = time.Now().UTC()
+			repo.WebhookLastDeliveryAt = d.ReceivedAt
 			repo.WebhookLastError = ""
 			if !shouldSync {
 				d.Status = "ignored"
@@ -361,10 +449,15 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 				*d = previousDelivery
 				repo.WebhookLastError = previousError
 				repo.WebhookLastStatus = previousStatus
+				repo.WebhookLastDeliveryAt = previousAt
+				if restoreErr := a.restoreLedgerDeliveryLocked(repoID, deliveryID, previousLedger, ledgerExists); restoreErr != nil {
+					log.Fatalf("restore webhook delivery ledger: %v", restoreErr)
+				}
 				a.mu.Unlock()
 				bad(w, 503, "could not record delivery")
 				return
 			}
+			a.recordLedgerDeliveryLocked(*d)
 			a.mu.Unlock()
 			if shouldSync {
 				go a.processWebhookPush(repoID, deliveryID)
@@ -373,6 +466,11 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if ledgerExists && previousLedger.Status != "failed" && previousLedger.Status != "reserved" {
+		a.mu.Unlock()
+		respond(w, 200, map[string]string{"status": "duplicate"})
+		return
+	}
 	status := "ignored"
 	if shouldSync {
 		status = "processing"
@@ -380,7 +478,19 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	previousDeliveries := a.state.WebhookDeliveries
 	previousAt := repo.WebhookLastDeliveryAt
 	previousStatus := repo.WebhookLastStatus
-	a.state.WebhookDeliveries = append(append([]WebhookDelivery{}, previousDeliveries...), WebhookDelivery{RepositoryID: repoID, ID: deliveryID, Event: eventType, Ref: ref, After: after, TargetType: repo.WebhookTargetType, TargetID: repo.WebhookTargetID, Status: status, ReceivedAt: time.Now().UTC()})
+	targetType, targetID := repo.WebhookTargetType, repo.WebhookTargetID
+	if ledgerExists {
+		// A retried delivery keeps the target selected when it was first
+		// accepted, even after its UI history entry has been evicted.
+		targetType, targetID = previousLedger.TargetType, previousLedger.TargetID
+	}
+	delivery := WebhookDelivery{RepositoryID: repoID, ID: deliveryID, Event: eventType, Ref: ref, After: after, TargetType: targetType, TargetID: targetID, Status: status, ReceivedAt: time.Now().UTC()}
+	if err := a.reserveLedgerDeliveryLocked(delivery); err != nil {
+		a.mu.Unlock()
+		bad(w, 503, "could not reserve delivery")
+		return
+	}
+	a.state.WebhookDeliveries = append(append([]WebhookDelivery{}, previousDeliveries...), delivery)
 	if len(a.state.WebhookDeliveries) > 1000 {
 		a.state.WebhookDeliveries = a.state.WebhookDeliveries[len(a.state.WebhookDeliveries)-1000:]
 	}
@@ -390,10 +500,14 @@ func (a *App) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		a.state.WebhookDeliveries = previousDeliveries
 		repo.WebhookLastDeliveryAt = previousAt
 		repo.WebhookLastStatus = previousStatus
+		if restoreErr := a.restoreLedgerDeliveryLocked(repoID, deliveryID, previousLedger, ledgerExists); restoreErr != nil {
+			log.Fatalf("restore webhook delivery ledger: %v", restoreErr)
+		}
 		a.mu.Unlock()
 		bad(w, 503, "could not record delivery")
 		return
 	}
+	a.recordLedgerDeliveryLocked(delivery)
 	a.mu.Unlock()
 	if shouldSync {
 		go a.processWebhookPush(repoID, deliveryID)
@@ -421,38 +535,43 @@ func (a *App) finishWebhookPush(repoID, deliveryID string, syncErr error) {
 		previousDelivery := *d
 		previousError, previousStatus, previousRunID := repo.WebhookLastError, repo.WebhookLastStatus, repo.WebhookLastRunID
 		previousRuns, previousAudit := a.state.Runs, a.state.Audit
+		deliveryError := ""
 		if syncErr != nil {
 			d.Status = "failed"
-			repo.WebhookLastError = syncErr.Error()
+			deliveryError = syncErr.Error()
 		} else if d.TargetType != "" && (!repo.WebhookEnabled || repo.WebhookTargetType != d.TargetType || repo.WebhookTargetID != d.TargetID) {
 			d.Status = "ignored"
-			repo.WebhookLastError = "trigger changed while syncing"
+			deliveryError = "trigger changed while syncing"
 		} else if d.TargetType != "" && (!commitID.MatchString(d.After) || repo.Revision != d.After) {
 			d.Status = "superseded"
-			repo.WebhookLastError = "push commit no longer matches the synced ref"
+			deliveryError = "push commit no longer matches the synced ref"
 		} else if d.TargetType != "" {
 			name, ok := a.webhookTargetLocked(repoID, d.TargetType, d.TargetID)
 			if !ok {
 				d.Status = "failed"
-				repo.WebhookLastError = "trigger target is unavailable"
+				deliveryError = "trigger target is unavailable"
 			} else {
 				run := a.queueWebhookApprovalLocked(d.TargetType, d.TargetID, name, "github push: "+repo.Name, "GitHub push "+d.Ref+" @ "+d.After)
 				d.RunID = run.ID
 				repo.WebhookLastRunID = run.ID
 				d.Status = "succeeded"
-				repo.WebhookLastError = ""
 			}
 		} else {
 			d.Status = "succeeded"
-			repo.WebhookLastError = ""
 		}
-		repo.WebhookLastStatus = d.Status
+		d.Error = deliveryError
+		if !d.ReceivedAt.Before(repo.WebhookLastDeliveryAt) {
+			repo.WebhookLastStatus = d.Status
+			repo.WebhookLastError = deliveryError
+		}
 		a.auditLocked("repository.webhook_"+d.Status, repo.Name+" delivery "+deliveryID)
 		if err := a.saveLocked(); err != nil {
 			*d = previousDelivery
 			repo.WebhookLastError, repo.WebhookLastStatus, repo.WebhookLastRunID = previousError, previousStatus, previousRunID
 			a.state.Runs, a.state.Audit = previousRuns, previousAudit
 			log.Printf("save webhook delivery: %v", err)
+		} else if a.deliveryLedger != nil {
+			a.recordLedgerDeliveryLocked(*d)
 		}
 		return
 	}

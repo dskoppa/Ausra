@@ -53,10 +53,19 @@ This is the implementation and release checklist for a team-ready, self-hosted A
 ### Overview and live command center
 
 - [ ] Show live run status, unhealthy connections, pending approvals, drift findings, policy failures, and next scheduled actions in one configurable overview. **P0**
+  - [x] Poll active runs, pending approvals, Git source errors, and the next enabled schedule every 10 seconds.
+  - [x] Save overview section visibility per browser and show refresh failures.
+  - [ ] Populate drift findings, policy failures, and non-Git connection health from real checks.
 - [ ] Provide a project map linking repositories, jobs, workflows, credentials, cloud accounts, and EKS clusters; selecting an item opens its detail panel. **P1**
+  - [x] Link repositories, jobs, and workflows by project; open a relationship panel on selection.
+  - [ ] Add managed credentials, cloud accounts, and EKS clusters when their models exist.
 - [x] Make health widgets actionable: each number opens a filtered list of the exact items it counts. **P0** Overview cards open their collections; active-run and approval counts filter Runs.
 - [ ] Show a recent activity timeline with actor, action, environment, outcome, and a link to the run or audit record. **P0**
+  - [x] Show recent run and audit events with links to their exact records.
+  - [ ] Record audit actors, environments, and outcomes as structured data instead of inferred or unavailable labels.
 - [ ] Provide useful first-run and empty states with a setup path: connect source, add credentials, create job, test, then schedule. **P0**
+  - [x] Guide source connection, job creation, test runs, and scheduling with relevant links and empty states.
+  - [ ] Provide a managed-credential setup step when credential storage and validation exist.
 
 ### Connection setup experiences
 
@@ -203,7 +212,7 @@ This is the implementation and release checklist for a team-ready, self-hosted A
 
 - [x] Connect public HTTPS Git repositories, choose a default branch/branch/tag/full commit, sync on demand, use a repository as a job source, and record the pinned commit for Git-backed runs. **P0** Verify a later sync cannot change an already requested run.
 - [ ] Add private Git connections through scoped credentials, repository allowlists, and host verification without placing secrets in URLs. **P0**
-- [ ] Verify Git webhook signatures, prevent replay, and trigger jobs from allowed events. **P0** GitHub SHA-256 verification, ref filtering, opt-in job/workflow mapping, approval-gated runs, exact `after` commit matching, and duplicate handling are implemented. Durable replay protection beyond the latest 1,000 deliveries remains.
+- [ ] Verify Git webhook signatures, prevent replay, and trigger jobs from allowed events. **P0** GitHub SHA-256 verification, ref filtering, opt-in job/workflow mapping, approval-gated runs, exact `after` commit matching, and a durable delivery-ID ledger are implemented. Tests cover replay after recent-history eviction and restart. On upgrade, IDs already evicted from the old JSON history cannot be backfilled; rotate the webhook secret in GitHub to invalidate old signed deliveries before calling replay protection complete.
 - [ ] Treat repositories and user-supplied job definitions as untrusted code; run them in isolated, disposable worker environments. **P0**
 - [ ] Add Ansible inventories from files, cloud inventory plugins, and typed variables; protect Vault material and show dry-run/check-mode output. **P1**
 - [ ] Add Terraform/OpenTofu `init`, `validate`, `plan`, `apply`, and `destroy` flows with separate permissions for destructive actions. **P0**
@@ -226,7 +235,7 @@ This is the implementation and release checklist for a team-ready, self-hosted A
 ## 10. Triggers and integrations
 
 - [ ] Support cron schedules with time zones, missed-run policy, daylight-saving behavior, and maintenance windows. **P1**
-- [ ] Add authenticated webhooks with signature verification, replay protection, rate limits, and idempotency keys. **P1** GitHub per-repository secrets, signature validation, and bounded persistent delivery deduplication are implemented; rate limits and other providers remain.
+- [ ] Add authenticated webhooks with signature verification, replay protection, rate limits, and idempotency keys. **P1** GitHub per-repository secrets, signature validation, a durable delivery-ID ledger, and per-repository rate limits are implemented; other providers remain.
 - [ ] Add Git, alert, and incident triggers with mapping from event to project/job and a test-event facility. **P1** GitHub push mapping and an approval-waiting test-run facility are implemented; alert and incident sources remain.
 - [ ] Add notification routes for run start/failure, approval requests, policy denies, and drift; allow project-level configuration. **P1**
 - [ ] Publish a stable API, CLI, and event schema for external integrations. **P1**
